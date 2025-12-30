@@ -1,25 +1,47 @@
-from PIL import Image, ImageOps, ImageEnhance, ImageFilter, ImageDraw, ImageFont
+import cv2
 import numpy as np
-import cv2  # OpenCV je obavezan za ovo
-import ezdxf
+from PIL import Image, ImageEnhance, ImageOps, ImageFilter, ImageDraw, ImageFont
+import ezdxf  # <--- NOVO: Za pravljenje vektorskih fajlova
 
 class ImageOpsEngine:
-    # --- STANDARD OPS ---
+    
     @staticmethod
-    def crop_image(image, crop_box):
-        return image.crop(crop_box)
+    def adjust_brightness(image, factor):
+        enhancer = ImageEnhance.Brightness(image)
+        return enhancer.enhance(factor)
+
+    @staticmethod
+    def adjust_contrast(image, factor):
+        enhancer = ImageEnhance.Contrast(image)
+        return enhancer.enhance(factor)
 
     @staticmethod
     def filter_grayscale(image):
         return ImageOps.grayscale(image)
-
+    
     @staticmethod
     def filter_sepia(image):
-        return ImageOps.colorize(ImageOps.grayscale(image), "#704214", "#C0C0C0")
+        width, height = image.size
+        pixels = image.load() 
+        for py in range(height):
+            for px in range(width):
+                r, g, b = image.getpixel((px, py))[:3]
+                tr = int(0.393 * r + 0.769 * g + 0.189 * b)
+                tg = int(0.349 * r + 0.686 * g + 0.168 * b)
+                tb = int(0.272 * r + 0.534 * g + 0.131 * b)
+                pixels[px, py] = (min(tr, 255), min(tg, 255), min(tb, 255), 255)
+        return image
 
     @staticmethod
-    def rotate_image(image, angle):
-        return image.rotate(angle, expand=True)
+    def filter_invert(image):
+        if image.mode == 'RGBA':
+            r, g, b, a = image.split()
+            rgb_image = Image.merge('RGB', (r, g, b))
+            inverted_image = ImageOps.invert(rgb_image)
+            r2, g2, b2 = inverted_image.split()
+            return Image.merge('RGBA', (r2, g2, b2, a))
+        else:
+            return ImageOps.invert(image)
 
     @staticmethod
     def filter_blur(image, radius=2):
@@ -27,176 +49,122 @@ class ImageOpsEngine:
 
     @staticmethod
     def filter_sharpen(image):
-        return image.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
+        return image.filter(ImageFilter.SHARPEN)
 
     @staticmethod
-    def filter_invert(image):
-        if image.mode == 'RGBA':
-            r, g, b, a = image.split()
-            rgb = Image.merge('RGB', (r, g, b))
-            inv = ImageOps.invert(rgb)
-            r2, g2, b2 = inv.split()
-            return Image.merge('RGBA', (r2, g2, b2, a))
-        return ImageOps.invert(image)
+    def apply_threshold(image, threshold_value=128):
+        """Pretvara sliku u čistu crno-belu (binarnu)"""
+        grayscale = image.convert("L")
+        # Sve iznad praga postaje belo (255), sve ispod crno (0)
+        return grayscale.point(lambda x: 255 if x > threshold_value else 0, mode="1").convert("RGBA")
 
     @staticmethod
-    def adjust_brightness(image, factor):
-        return ImageEnhance.Brightness(image).enhance(factor)
+    def rotate_image(image, angle):
+        return image.rotate(angle, expand=True)
 
     @staticmethod
     def auto_enhance(image):
-        return ImageOps.autocontrast(image.convert("RGB"), cutoff=2)
-    
-    # --- CNC / ENGINEERING ---
+        return ImageOps.autocontrast(image.convert("RGB")).convert("RGBA")
+
     @staticmethod
-    def generate_cnc_heightmap(image):
-        img = ImageOps.grayscale(image)
-        img = img.filter(ImageFilter.GaussianBlur(radius=1))
-        img = ImageOps.autocontrast(img, cutoff=1)
-        return img.convert("RGB")
+    def generate_edge_map(image):
+        """Vraća vizuelni prikaz ivica (Raster)"""
+        # Konverzija u OpenCV format
+        img_np = np.array(image)
+        gray = cv2.cvtColor(img_np, cv2.COLOR_RGBA2GRAY)
+        # Canny algoritam
+        edges = cv2.Canny(gray, 100, 200)
+        # Vrati nazad u PIL
+        return Image.fromarray(edges).convert("RGBA")
 
     @staticmethod
     def generate_normal_map(image):
-        gray = ImageOps.grayscale(image)
-        x_kernel = (-1, 0, 1, -2, 0, 2, -1, 0, 1)
-        y_kernel = (-1, -2, -1, 0, 0, 0, 1, 2, 1)
-        dx = gray.filter(ImageFilter.Kernel((3, 3), x_kernel, scale=1))
-        dy = gray.filter(ImageFilter.Kernel((3, 3), y_kernel, scale=1))
+        # Jednostavna simulacija normal map-a (sobel filteri)
+        img_np = np.array(image.convert("L"))
+        sobelx = cv2.Sobel(img_np, cv2.CV_64F, 1, 0, ksize=5)
+        sobely = cv2.Sobel(img_np, cv2.CV_64F, 0, 1, ksize=5)
         
-        width, height = gray.size
-        normal_map = Image.new("RGB", (width, height))
-        pixels_x = dx.load()
-        pixels_y = dy.load()
-        pixels_out = normal_map.load()
+        # Normalizacija
+        sobelx = np.uint8(np.absolute(sobelx))
+        sobely = np.uint8(np.absolute(sobely))
         
-        for y in range(height):
-            for x in range(width):
-                val_x = pixels_x[x, y] // 2 + 128
-                val_y = pixels_y[x, y] // 2 + 128
-                pixels_out[x, y] = (val_x, val_y, 255)
-        return normal_map
-    
-    # ... (ostale metode ostaju iste) ...
+        # Spajanje u RGB (Blue kanal je Z-osa, obično bela/svetla)
+        zeros = np.zeros_like(sobelx)
+        normal_map = np.dstack((sobelx, sobely, np.full_like(sobelx, 255)))
+        return Image.fromarray(normal_map).convert("RGBA")
 
     @staticmethod
     def apply_dithering(image):
-        """
-        Pretvara sliku u 1-bitnu (Crno-Belo) koristeći Floyd-Steinberg algoritam.
-        Ovo je OBAVEZNO za lasersko graviranje fotografija.
-        """
-        # 1. Konvertuj u Grayscale
-        gray = ImageOps.grayscale(image)
-        
-        # 2. Primeni Dithering
-        dithered = gray.convert("1") # "1" mode je 1-bit pixel (dithering je automatski u PIL-u)
-        
-        # 3. Vrati u RGBA da bi se videlo u Layer sistemu
-        return dithered.convert("RGBA")
+        """Priprema za lasersko graviranje (Halftone)"""
+        return image.convert("1").convert("RGBA")
 
-    # --- VECTOR PREP (AŽURIRAN ZA v7.0) ---
     @staticmethod
-    def generate_edge_map(image):
-        """
-        Koristi OpenCV Canny Edge Detection za savršene ivice.
-        Rešava problem sa transparentnim slojevima.
-        """
-        # 1. Konvertuj PIL -> NumPy
-        img_np = np.array(image)
-        
-        # 2. Proveri da li ima Alpha kanal (RGBA)
-        if img_np.shape[2] == 4:
-            # Izdvoj Alpha kanal
-            alpha = img_np[:, :, 3]
-            # Konvertuj u Grayscale
-            gray = cv2.cvtColor(img_np, cv2.COLOR_RGBA2GRAY)
-            # Tamo gde je providno (alpha=0), stavi crnu boju da ne pravi ivice oko kvadrata
-            gray[alpha == 0] = 0
-        else:
-            gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+    def magic_erase(image, point, tolerance=30):
+        # Flood fill algoritam za brisanje pozadine (pojednostavljeno)
+        # Za pravi 'magic wand' treba nam složeniji algoritam, 
+        # ali ovde koristimo jednostavan pristup ili Rembg ako je dostupan.
+        # Ovo je placeholder za jednostavnu logiku ako ne koristimo AI.
+        return image # Za sada ne radimo manual magic erase bez NumPy trikova
 
-        # 3. Malo blura da smanjimo šum pre detekcije
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-
-        # 4. Canny Edge Detection (Automatski pronalazi ivice)
-        # 50 i 150 su pragovi osetljivosti.
-        edges = cv2.Canny(blurred, 50, 150)
-
-        # 5. Podebljaj ivice malo (Dilation) da se bolje vide
-        kernel = np.ones((2,2), np.uint8)
-        edges = cv2.dilate(edges, kernel, iterations=1)
-
-        # 6. Vrati nazad u PIL format (RGBA)
-        # Rezultat je crno-bela slika (bela ivica, crna pozadina)
-        return Image.fromarray(edges).convert("RGBA")
+    # --- VECTOR TOOLS ---
     
-    # --- TOOLS ---
     @staticmethod
-    def magic_erase(image, xy, tolerance=50):
-        if image.mode != "RGBA":
-            image = image.convert("RGBA")
-        ImageDraw.floodfill(image, xy, value=(0,0,0,0), thresh=tolerance)
-        return image
-
-    @staticmethod
-    def add_text(image, xy, text, color, size, font_name="Arial"):
+    def add_text(image, pos, text, color, size, font_name="Arial"):
         draw = ImageDraw.Draw(image)
-        font = None
         try:
-            font = ImageFont.truetype(font_name, size)
+            # Pokušaj da učitaš sistemski font
+            font = ImageFont.truetype(f"{font_name}.ttf", size)
         except:
-            try:
-                font = ImageFont.truetype(f"{font_name}.ttf", size)
-            except:
-                font = ImageFont.load_default()
-        
-        draw.text(xy, text, fill=color, font=font)
+            # Fallback
+            font = ImageFont.load_default()
+            
+        draw.text(pos, text, font=font, fill=color)
         return image
 
-    # --- THRESHOLD & DXF ---
     @staticmethod
-    def apply_threshold(image, threshold_value):
-        """
-        Binarizacija: Pretvara sliku u čisto CRNO i BELO.
-        Ključno za pripremu za CNC sečenje/graviranje.
-        """
-        # 1. Konvertuj u Grayscale (sivo) da bi imali vrednosti 0-255
-        gray = ImageOps.grayscale(image)
-        
-        # 2. Primeni prag (sve iznad praga je belo, ispod je crno)
-        # threshold_value dolazi sa slajdera (0-255)
-        binary = gray.point(lambda p: 255 if p > threshold_value else 0)
-        
-        # 3. FIX: Konvertuj u RGBA!
-        # Layer Manager ne prihvata obične 'L' ili 'RGB' slike, mora imati Alpha kanal.
-        return binary.convert("RGBA")
+    def crop_image(image, box):
+        return image.crop(box)
 
     @staticmethod
-    def export_dxf(image, filepath):
-        # Priprema za DXF export
-        # Mora da radi sa OpenCV konturama
-        cv_image = np.array(image.convert("L"))
+    def export_dxf_vectors(image, filepath):
+        """
+        Glavna zvezda: Pretvara sliku u Vektore (DXF) za sečenje!
+        1. Pretvara u crno-belo
+        2. Nalazi konture
+        3. Crta te konture kao polilinije u DXF fajl
+        """
+        # 1. Priprema (OpenCV)
+        img_np = np.array(image.convert("RGB")) # DXF ne mari za alpha kanal
+        gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
         
-        # Binarizacija
-        _, binary = cv2.threshold(cv_image, 127, 255, cv2.THRESH_BINARY)
+        # Threshold (mora biti binarna slika da bi našao ivice)
+        _, binary = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY_INV)
         
-        # Pronalaženje kontura
+        # 2. Pronalaženje kontura (RETR_LIST daje sve konture, CHAIN_APPROX_SIMPLE smanjuje broj tačaka)
         contours, _ = cv2.findContours(binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
         
+        if not contours:
+            return 0
+            
+        # 3. Pravljenje DXF fajla
         doc = ezdxf.new()
         msp = doc.modelspace()
         
         count = 0
-        height, width = binary.shape
-        
         for contour in contours:
-            if len(contour) < 3: continue
+            # OpenCV vraća konture kao [ [[x,y]], [[x,y]]... ]
+            # Treba nam lista (x, y)
             points = []
             for point in contour:
-                px, py = point[0]
-                points.append((px, height - py)) 
+                x, y = point[0]
+                # Y osa je obrnuta u slikama vs CAD-u, ali za početak ostavljamo ovako
+                # Da bi bilo "uspravno" u CAD-u, često se radi: (x, -y)
+                points.append((float(x), float(-y)))
             
-            msp.add_lwpolyline(points, close=True, dxfattribs={'layer': 'CUT_PATH', 'color': 1})
-            count += 1
-            
+            if len(points) > 1:
+                # Dodajemo "LWPOLYLINE" (Lightweight Polyline) u DXF
+                msp.add_lwpolyline(points, close=True, dxfattribs={'color': 7}) # Boja 7 je bela/crna
+                count += 1
+                
         doc.saveas(filepath)
         return count

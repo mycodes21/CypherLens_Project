@@ -1,91 +1,87 @@
-import pickle
-from tkinter import filedialog, messagebox
+import json
+import os
+import zipfile
+import io
 from PIL import Image
+from tkinter import messagebox
 
 class ProjectManager:
     @staticmethod
-    def save_project(current_image, history, redo_stack):
+    def save_project(layer_manager, filepath):
         """
-        Čuva celo stanje aplikacije u .clp fajl (CypherLens Project).
-        Koristi pickle da 'zaledi' podatke.
-        """
-        file_path = filedialog.asksaveasfilename(
-            defaultextension=".clp",
-            filetypes=[("CypherLens Project", "*.clp")],
-            title="Save Project"
-        )
         
-        if not file_path:
-            return None
-
-        # Pakujemo sve podatke u jedan rečnik (Dictionary)
-        project_data = {
-            "image": current_image,
-            "history": history,
-            "redo_stack": redo_stack
-        }
-
+        Čuva projekat kao ZIP arhivu (.cph) koja sadrži:
+        1. project.json (podaci o slojevima: ime, opacity, visible...)
+        2. layer_0.png, layer_1.png... (slike svakog sloja)
+        """
         try:
-            with open(file_path, "wb") as f:
-                pickle.dump(project_data, f)
-            print(f"Projekat sačuvan: {file_path}")
+            with zipfile.ZipFile(filepath, 'w', zipfile.ZIP_DEFLATED) as zf:
+                metadata = []
+                
+                # Prolazimo kroz sve slojeve iz LayerManager-a
+                for index, layer in enumerate(layer_manager.layers):
+                    # 1. Sačuvaj sliku u memoriju pa u ZIP
+                    img_filename = f"layer_{index}.png"
+                    img_byte_arr = io.BytesIO()
+                    layer.image.save(img_byte_arr, format='PNG')
+                    zf.writestr(img_filename, img_byte_arr.getvalue())
+                    
+                    # 2. Pripremi podatke za JSON
+                    layer_data = {
+                        "name": layer.name,
+                        "visible": layer.visible,
+                        "opacity": layer.opacity,
+                        "image_file": img_filename
+                    }
+                    metadata.append(layer_data)
+                
+                # 3. Sačuvaj JSON opis celog projekta
+                zf.writestr('project.json', json.dumps(metadata, indent=4))
+                
+            print(f"Project saved to: {filepath}")
             return True
+            
         except Exception as e:
-            print(f"Greška pri čuvanju projekta: {e}")
+            print(f"Save Error: {e}")
             return False
 
     @staticmethod
-    def load_project():
+    def load_project(filepath, layer_manager):
         """
-        Učitava .clp fajl i vraća podatke nazad u aplikaciju.
+        Učitava .cph fajl (ZIP) i rekonstruiše slojeve u LayerManager.
         """
-        file_path = filedialog.askopenfilename(
-            filetypes=[("CypherLens Project", "*.clp")],
-            title="Open Project"
-        )
-
-        if not file_path:
-            return None
-
         try:
-            with open(file_path, "rb") as f:
-                data = pickle.load(f)
-            return data # Vraća rečnik sa slikom i istorijom
-        except Exception as e:
-            print(f"Greška pri učitavanju projekta: {e}")
-            return None
-
-    @staticmethod
-    def export_image(image):
-        """
-        Čuva SAMO trenutnu sliku u standardnom formatu (JPG, PNG...).
-        """
-        if not image:
-            return
-
-        file_path = filedialog.asksaveasfilename(
-            defaultextension=".png",
-            filetypes=[
-                ("PNG Image", "*.png"),
-                ("JPEG Image", "*.jpg"),
-                ("Bitmap", "*.bmp"),
-                ("TIFF Image", "*.tiff")
-            ],
-            title="Export Image"
-        )
-
-        if file_path:
-            try:
-                # Ako je JPG, moramo konvertovati RGBA u RGB (jer JPG ne podržava providnost)
-                if file_path.lower().endswith(".jpg") or file_path.lower().endswith(".jpeg"):
-                    if image.mode == "RGBA":
-                        rgb_im = image.convert("RGB")
-                        rgb_im.save(file_path)
-                    else:
-                        image.save(file_path)
-                else:
-                    image.save(file_path)
+            with zipfile.ZipFile(filepath, 'r') as zf:
+                # 1. Proveri i učitaj JSON
+                if 'project.json' not in zf.namelist():
+                    raise ValueError("Invalid project file: missing project.json")
                 
-                print(f"Slika exportovana: {file_path}")
-            except Exception as e:
-                messagebox.showerror("Export Error", f"Neuspešan export: {e}")
+                json_data = zf.read('project.json')
+                metadata = json.loads(json_data)
+                
+                # Očisti trenutne slojeve u aplikaciji
+                layer_manager.layers = []
+                layer_manager.active_index = -1
+                
+                # 2. Rekonstruiši slojeve jedan po jedan
+                for data in metadata:
+                    img_file = data['image_file']
+                    
+                    # Čitamo sliku direktno iz ZIP-a u memoriju
+                    img_data = zf.read(img_file)
+                    
+                    # Konvertuj bytes -> PIL Image
+                    image = Image.open(io.BytesIO(img_data)).convert("RGBA")
+                    
+                    # Dodaj u manager
+                    new_layer = layer_manager.add_layer(image, data['name'])
+                    
+                    # Vrati stara podešavanja
+                    new_layer.visible = data.get('visible', True)
+                    new_layer.opacity = data.get('opacity', 255)
+            
+            return True
+            
+        except Exception as e:
+            print(f"Load Error: {e}")
+            return False
