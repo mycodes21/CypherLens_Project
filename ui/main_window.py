@@ -198,15 +198,37 @@ class CypherLensApp(ctk.CTk):
     # --- MOUSE EVENTS ---
     def on_mouse_down(self, event):
         img = self.get_active_image()
+        # Za move (pan) ne treba nam nužno aktivna slika
+        if self.current_tool == "move": 
+            self.last_pan_x = event.x; self.last_pan_y = event.y
+            return
+
         if not img: return
         self.start_x = event.x; self.start_y = event.y
+        
+        # --- EYEDROPPER (PIPETA) ---
+        if self.current_tool == "eyedropper":
+            p = self.map_coords(event.x, event.y)
+            if p:
+                try:
+                    # Uzmi boju piksela
+                    rgba = img.getpixel(p)
+                    hex_color = '#{:02x}{:02x}{:02x}'.format(rgba[0], rgba[1], rgba[2])
+                    self.tool_color = hex_color # Postavi kao trenutnu boju
+                    self.update_status(f"Color Picked: {hex_color} {rgba}")
+                    if self.properties: # Ako imamo color picker u properties (kasnije)
+                        pass 
+                except: pass
+            return
 
+        # --- RULER ---
         if self.current_tool == "ruler":
             if self.temp_item_id: self.canvas.delete(self.temp_item_id)
             if self.ruler_text_id: self.canvas.delete(self.ruler_text_id)
             self.temp_item_id = self.canvas.create_line(event.x, event.y, event.x, event.y, fill="#FF00FF", width=2, dash=(4, 4))
             return
 
+        # --- MAGIC WAND ---
         if self.current_tool == "magic":
             self.save_state(); p = self.map_coords(event.x, event.y)
             if p:
@@ -217,38 +239,103 @@ class CypherLensApp(ctk.CTk):
                 except: pass
             return
 
+        # --- TEXT ---
         if self.current_tool == "text":
             if self.temp_item_id: self.apply_shape_to_image(); return
             self.temp_item_id = self.canvas.create_text(event.x, event.y, text="Type here...", fill=self.tool_color, font=("Arial", 50, "bold"), anchor="center")
             self.properties.show_apply_btn(); self.properties.entry_text.focus_set(); self.is_moving_shape = True; return
 
+        # --- MOVE SHAPE / CROP HANDLES ---
         if self.temp_item_id and self.current_tool in ["rect", "circle", "line", "crop", "text"]:
             bbox = self.canvas.bbox(self.temp_item_id); margin = 20 if self.current_tool == "text" else 5
             if bbox and (bbox[0]-margin <= event.x <= bbox[2]+margin) and (bbox[1]-margin <= event.y <= bbox[3]+margin): self.is_moving_shape = True; return
             else: self.apply_shape_to_image()
 
-        if self.current_tool == "move": self.last_pan_x = event.x; self.last_pan_y = event.y
-        elif self.current_tool == "pencil": self.save_state(); self.last_draw_x = event.x; self.last_draw_y = event.y
+        # --- DRAWING INITIALIZATION (Brush, Pencil, Eraser) ---
+        if self.current_tool in ["pencil", "brush", "eraser"]:
+            self.save_state() # Sačuvaj pre crtanja
+            self.last_draw_x = event.x
+            self.last_draw_y = event.y
+
+        # --- RESET SHAPES ---
         elif self.current_tool in ["rect", "circle", "line", "crop", "select"]:
             if self.temp_item_id: self.canvas.delete(self.temp_item_id); self.temp_item_id = None; self.properties.hide_apply_btn()
+
+        # --- MOVE LAYER INITIALIZATION ---
+        if self.current_tool == "move_layer":
+            self.last_pan_x = event.x; self.last_pan_y = event.y
 
     def on_mouse_drag(self, event):
         img = self.get_active_image()
         self.on_mouse_move_global(event)
+        
+        # 1. PAN VIEW (Pomeranje kamere)
+        if self.current_tool == "move":
+            dx = event.x - self.last_pan_x; dy = event.y - self.last_pan_y
+            self.pan_offset_x += dx; self.pan_offset_y += dy
+            self.last_pan_x = event.x; self.last_pan_y = event.y
+            self._update_canvas()
+            return
+
         if not img: return
 
-        # 1. PENCIL
-        if self.current_tool == "pencil":
+        # 2. MOVE LAYER (Pomeranje samog sloja)
+        if self.current_tool == "move_layer":
+            dx = event.x - self.last_pan_x
+            dy = event.y - self.last_pan_y
+            
+            # Ažuriramo ofset sloja
+            layer = self.layer_manager.get_active_layer()
+            if layer:
+                # Delimo sa zoom_level da bi pomeranje bilo prirodno
+                layer.x += int(dx / self.zoom_level)
+                layer.y += int(dy / self.zoom_level)
+                
+            self.last_pan_x = event.x; self.last_pan_y = event.y
+            self._update_canvas()
+            return
+
+        # 3. FREEHAND DRAWING (Brush, Pencil, Eraser)
+        if self.current_tool in ["pencil", "brush", "eraser"]:
             draw = ImageDraw.Draw(img)
             p1 = self.map_coords(self.last_draw_x, self.last_draw_y)
             p2 = self.map_coords(event.x, event.y)
+            
             if p1 and p2:
-                draw.line([p1, p2], fill=self.tool_color, width=3)
-                self.set_active_image(img)
+                # Podešavanje debljine
+                width = 3 # Default za olovku
+                if self.current_tool == "brush": width = 10 # Deblje za četkicu
+                if self.current_tool == "eraser": width = 20 # Još deblje za gumicu
+                
+                # Pokušaj da uzmeš debljinu iz properties ako postoji
+                try: width = int(self.properties.slider_size.get() / self.zoom_level)
+                except: pass
+
+                color = self.tool_color
+                
+                if self.current_tool == "eraser":
+                    # Trik za brisanje: Crtamo sa "ink" modom koji briše alpha kanal
+                    # U PIL-u draw.line nema jednostavan 'clear' mode, 
+                    # pa je najbolje rešenje crtanje kruga na svakoj tački ili kompleksniji mask approach.
+                    # Za sada, crtamo transparentnu boju (ovo radi samo ako je RGBA mod ispravan)
+                    draw.line([p1, p2], fill=(0,0,0,0), width=width, joint="curve")
+                    # Za bolji efekat gumice (krugovi na krajevima):
+                    r = width // 2
+                    draw.ellipse((p1[0]-r, p1[1]-r, p1[0]+r, p1[1]+r), fill=(0,0,0,0), outline=None)
+                else:
+                    # Obično crtanje
+                    draw.line([p1, p2], fill=color, width=width, joint="curve")
+                    # Zaoblje krajeve za Brush
+                    if self.current_tool == "brush":
+                        r = width // 2
+                        draw.ellipse((p1[0]-r, p1[1]-r, p1[0]+r, p1[1]+r), fill=color, outline=None)
+
+                self.set_active_image(img) # Osveži prikaz
+            
             self.last_draw_x = event.x; self.last_draw_y = event.y
             return
 
-        # 2. SHAPES PREVIEW
+        # 4. SHAPES PREVIEW
         if self.current_tool in ["rect", "circle", "line", "select", "crop"]:
             if self.temp_item_id: self.canvas.delete(self.temp_item_id)
             outline = "#66FCF1" if self.current_tool in ["select", "crop"] else self.tool_color
@@ -262,7 +349,7 @@ class CypherLensApp(ctk.CTk):
                 self.temp_item_id = self.canvas.create_line(self.start_x, self.start_y, event.x, event.y, fill=outline, width=2)
             return
 
-        # 3. RULER
+        # 5. RULER
         if self.current_tool == "ruler" and self.temp_item_id:
             self.canvas.coords(self.temp_item_id, self.start_x, self.start_y, event.x, event.y)
             p1 = self.map_coords(self.start_x, self.start_y); p2 = self.map_coords(event.x, event.y)
@@ -274,18 +361,11 @@ class CypherLensApp(ctk.CTk):
                 self.ruler_text_id = self.canvas.create_text(event.x+15, event.y+15, text=text_str, fill="#FF00FF", font=("Arial", 12, "bold"), anchor="w")
             return
 
-        # 4. MOVE SHAPE
+        # 6. MOVE SHAPE (Existing objects on canvas)
         if self.is_moving_shape and self.temp_item_id:
             dx = event.x - self.start_x; dy = event.y - self.start_y
             self.canvas.move(self.temp_item_id, dx, dy)
             self.start_x = event.x; self.start_y = event.y; return
-
-        # 5. PAN VIEW
-        if self.current_tool == "move":
-            dx = event.x - self.last_pan_x; dy = event.y - self.last_pan_y
-            self.pan_offset_x += dx; self.pan_offset_y += dy
-            self.last_pan_x = event.x; self.last_pan_y = event.y
-            self._update_canvas()
 
     def on_mouse_up(self, event):
         self.is_moving_shape = False
@@ -336,9 +416,17 @@ class CypherLensApp(ctk.CTk):
 
     # --- TOOLS & HELPERS ---
     def set_active_tool(self, tool_name):
-        if self.temp_item_id: self.apply_shape_to_image()
-        if self.ruler_text_id: self.canvas.delete(self.ruler_text_id); self.ruler_text_id = None
-        if self.preview_source_image: self.apply_adjustment() 
+        # Cursor setup
+        if tool_name == "move": self.canvas.config(cursor="fleur")       # Hand
+        elif tool_name == "move_layer": self.canvas.config(cursor="arrow") # Arrow
+        elif tool_name == "magic": self.canvas.config(cursor="spider")
+        elif tool_name == "text": self.canvas.config(cursor="xterm")
+        elif tool_name == "ruler": self.canvas.config(cursor="crosshair")
+        elif tool_name == "brush": self.canvas.config(cursor="dot")      # Dot for brush
+        elif tool_name == "eraser": self.canvas.config(cursor="circle")  # Circle for eraser
+        elif tool_name == "eyedropper": self.canvas.config(cursor="crosshair")
+        elif tool_name in ["rect", "circle", "line", "crop", "select", "pencil"]: self.canvas.config(cursor="crosshair")
+        else: self.canvas.config(cursor="arrow")
         
         self.current_tool = tool_name
         self.update_status(f"Tool: {tool_name.upper()}")

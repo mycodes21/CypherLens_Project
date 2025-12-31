@@ -9,33 +9,36 @@ class Toolbar(ctk.CTkFrame):
         # Layout
         self.pack_propagate(False) 
         
-        # --- ALATKE ---
-        # Navigacija
-        self._add_tool_btn("✋", "move")
-        self._add_tool_btn("✂️", "crop")
+        # --- 1. NAVIGACIJA & MOVE ---
+        self._add_tool_btn("✋", "move", "Pan View (Pomeri pogled)")
+        self._add_tool_btn("✥", "move_layer", "Move Layer (Pomeri sloj)") # NOVO
         
-        # Oblici i Crtanje
-        self._add_tool_btn("✏️", "pencil")
-        self._add_tool_btn("⬜", "rect")
-        self._add_tool_btn("⭕", "circle")
-        self._add_tool_btn("📏", "line") # Linija
+        # --- 2. CRTANJE & RETUŠIRANJE ---
+        self._add_tool_btn("🖌️", "brush", "Brush Tool")      # NOVO
+        self._add_tool_btn("🧽", "eraser", "Eraser Tool")    # NOVO
+        self._add_tool_btn("🧪", "eyedropper", "Pick Color") # NOVO
         
-        # Merenje i Tekst
-        self._add_tool_btn("📐", "ruler")
-        self._add_tool_btn("T", "text")
+        # --- 3. OBLICI ---
+        self._add_tool_btn("✂️", "crop", "Crop Image")
+        self._add_tool_btn("⬜", "rect", "Rectangle")
+        self._add_tool_btn("⭕", "circle", "Circle")
+        self._add_tool_btn("📏", "line", "Line") 
         
-    def _add_tool_btn(self, icon, tool_name):
+        # --- 4. MERENJE & TEKST ---
+        self._add_tool_btn("📐", "ruler", "Measure Distance")
+        self._add_tool_btn("T", "text", "Add Text")
+        
+    def _add_tool_btn(self, icon, tool_name, tooltip_text=""):
+        # Koristimo okvir da bismo mogli kasnije dodati Tooltip ako treba
         btn = ctk.CTkButton(self, text=icon, width=40, height=40, 
                             fg_color="transparent", text_color="gray",
                             hover_color="#444",
-                            font=("Arial", 20),
-                            # KLJUČNO: Klikom zovemo set_active_tool
+                            font=("Arial", 18),
                             command=lambda t=tool_name: self.app.set_active_tool(t))
-        btn.pack(pady=5, padx=5)
+        btn.pack(pady=3, padx=5)
         self.buttons[tool_name] = btn
 
     def select_tool(self, tool_name):
-        # Vizuelna promena (bez logike)
         for name, btn in self.buttons.items():
             if name == tool_name:
                 btn.configure(fg_color="#66FCF1", text_color="black")
