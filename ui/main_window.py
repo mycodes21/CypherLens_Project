@@ -556,6 +556,42 @@ class CypherLensApp(ctk.CTk):
         if self.properties:
             self.properties.show_layer_properties()
 
+    def update_adjustment_preview(self, value):
+        """Live preview za filtere (Blur, Sharpen...)."""
+        if not self.preview_source_image: return
+        val = float(value)
+        
+        new_img = None
+        if self.current_tool == "adj_blur":
+            # ImageOpsEngine.filter_blur očekuje (sliku, radius)
+            new_img = ImageOpsEngine.filter_blur(self.preview_source_image, radius=val)
+            
+        elif self.current_tool == "adj_sharpen":
+            # Ovde možemo napraviti jednostavnu logiku, npr. ponoviti sharpen više puta ili blendovati
+            # Za sad, samo jedan sharpen ako je value > 5
+            if val > 1:
+                new_img = ImageOpsEngine.filter_sharpen(self.preview_source_image)
+            else:
+                new_img = self.preview_source_image.copy()
+                
+        if new_img:
+            self.set_active_image(new_img)
+            self.update_status(f"Filter Preview: {val:.1f}")
+
+    def apply_adjustment(self):
+        """
+        Ova metoda služi da potvrdi izmene (npr. Brightness) 
+        kada korisnik promeni alat a nije kliknuo 'Apply'.
+        """
+        if self.preview_source_image:
+            # Ako postoji preview slika, neka ona postane zvanična
+            self.update_status("Adjustment Applied automatically")
+            # Ovde samo resetujemo preview, jer je slika već na ekranu
+            self.preview_source_image = None
+            # Vratimo properties panel na početak
+            if self.properties:
+                self.properties.show_layer_properties()
+
     # --- LAYER PROPERTIES UPDATE ---
     def update_layer_property(self, prop, value):
         """Ovu metodu poziva properties.py za opacity, scale, rotate."""
