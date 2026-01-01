@@ -8,7 +8,7 @@
 
 Unlike standard photo editors, CypherLens focuses on converting images into machine-readable formats, extracting precise vectors, creating depth maps for 3D relief, and generating G-Code for laser engraving.
 
-![App Screenshot](assets/screenshot_main.png)
+![App Screenshot](assets/Screenshot_main.png)
 
 ---
 
