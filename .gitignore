@@ -17,3 +17,9 @@ venv/
 # System
 .DS_Store
 Thumbs.db
+V0.py
+
+# Build artifacts
+dist/
+build/
+*.spec
