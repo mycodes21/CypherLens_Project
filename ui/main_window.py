@@ -266,7 +266,7 @@ class CypherLensApp(ctk.CTk):
             self.last_pan_x = event.x; self.last_pan_y = event.y
 
     def on_mouse_drag(self, event):
-        img = self.get_active_image()
+        img = self.get_active_image() # Ovo nam daje sliku aktivnog sloja
         self.on_mouse_move_global(event)
         
         # 1. PAN VIEW (Pomeranje kamere)
@@ -283,59 +283,62 @@ class CypherLensApp(ctk.CTk):
         if self.current_tool == "move_layer":
             dx = event.x - self.last_pan_x
             dy = event.y - self.last_pan_y
-            
-            # Ažuriramo ofset sloja
             layer = self.layer_manager.get_active_layer()
             if layer:
-                # Delimo sa zoom_level da bi pomeranje bilo prirodno
                 layer.x += int(dx / self.zoom_level)
                 layer.y += int(dy / self.zoom_level)
-                
             self.last_pan_x = event.x; self.last_pan_y = event.y
             self._update_canvas()
             return
 
         # 3. FREEHAND DRAWING (Brush, Pencil, Eraser)
         if self.current_tool in ["pencil", "brush", "eraser"]:
+            # --- POPRAVKA: UZIMAMO POZICIJU SLOJA ---
+            layer = self.layer_manager.get_active_layer()
+            off_x = layer.x
+            off_y = layer.y
+            sc = layer.scale
+            # ----------------------------------------
+
             draw = ImageDraw.Draw(img)
-            p1 = self.map_coords(self.last_draw_x, self.last_draw_y)
-            p2 = self.map_coords(event.x, event.y)
             
-            if p1 and p2:
-                # Podešavanje debljine
-                width = 3 # Default za olovku
-                if self.current_tool == "brush": width = 10 # Deblje za četkicu
-                if self.current_tool == "eraser": width = 20 # Još deblje za gumicu
-                
-                # Pokušaj da uzmeš debljinu iz properties ako postoji
-                try: width = int(self.properties.slider_size.get() / self.zoom_level)
+            # Mapiramo koordinate sa ekrana u globalni prostor
+            p1_global = self.map_coords(self.last_draw_x, self.last_draw_y)
+            p2_global = self.map_coords(event.x, event.y)
+            
+            if p1_global and p2_global:
+                # --- KONVERZIJA U LOKALNI PROSTOR SLOJA ---
+                p1 = ((p1_global[0] - off_x) / sc, (p1_global[1] - off_y) / sc)
+                p2 = ((p2_global[0] - off_x) / sc, (p2_global[1] - off_y) / sc)
+                # ------------------------------------------
+
+                # Odredi debljinu
+                width = 3
+                if self.current_tool == "brush": width = 10
+                if self.current_tool == "eraser": width = 20
+                try: width = int(self.properties.slider_size.get() / self.zoom_level / sc)
                 except: pass
 
                 color = self.tool_color
                 
                 if self.current_tool == "eraser":
-                    # Trik za brisanje: Crtamo sa "ink" modom koji briše alpha kanal
-                    # U PIL-u draw.line nema jednostavan 'clear' mode, 
-                    # pa je najbolje rešenje crtanje kruga na svakoj tački ili kompleksniji mask approach.
-                    # Za sada, crtamo transparentnu boju (ovo radi samo ako je RGBA mod ispravan)
+                    # Gumica (providno)
                     draw.line([p1, p2], fill=(0,0,0,0), width=width, joint="curve")
-                    # Za bolji efekat gumice (krugovi na krajevima):
                     r = width // 2
                     draw.ellipse((p1[0]-r, p1[1]-r, p1[0]+r, p1[1]+r), fill=(0,0,0,0), outline=None)
                 else:
-                    # Obično crtanje
+                    # Crtanje
                     draw.line([p1, p2], fill=color, width=width, joint="curve")
-                    # Zaoblje krajeve za Brush
                     if self.current_tool == "brush":
                         r = width // 2
                         draw.ellipse((p1[0]-r, p1[1]-r, p1[0]+r, p1[1]+r), fill=color, outline=None)
 
-                self.set_active_image(img) # Osveži prikaz
+                self.set_active_image(img)
             
             self.last_draw_x = event.x; self.last_draw_y = event.y
             return
 
-        # 4. SHAPES PREVIEW
+        # 4. SHAPES PREVIEW (Samo crta okvir na ekranu, ovo ostaje isto)
         if self.current_tool in ["rect", "circle", "line", "select", "crop"]:
             if self.temp_item_id: self.canvas.delete(self.temp_item_id)
             outline = "#66FCF1" if self.current_tool in ["select", "crop"] else self.tool_color
@@ -361,12 +364,11 @@ class CypherLensApp(ctk.CTk):
                 self.ruler_text_id = self.canvas.create_text(event.x+15, event.y+15, text=text_str, fill="#FF00FF", font=("Arial", 12, "bold"), anchor="w")
             return
 
-        # 6. MOVE SHAPE (Existing objects on canvas)
+        # 6. MOVE SHAPE
         if self.is_moving_shape and self.temp_item_id:
             dx = event.x - self.start_x; dy = event.y - self.start_y
             self.canvas.move(self.temp_item_id, dx, dy)
             self.start_x = event.x; self.start_y = event.y; return
-
     def on_mouse_up(self, event):
         self.is_moving_shape = False
         
@@ -382,35 +384,81 @@ class CypherLensApp(ctk.CTk):
 
     def apply_shape_to_image(self):
         if not self.temp_item_id: return
-        img = self.get_active_image()
-        if not img: return
-        self.save_state(); coords = self.canvas.coords(self.temp_item_id)
+        
+        # 1. Uzmi aktivni sloj (trebaju nam x, y i scale podaci)
+        layer = self.layer_manager.get_active_layer()
+        if not layer or not layer.image: return
+        img = layer.image
+        
+        self.save_state()
+        coords = self.canvas.coords(self.temp_item_id)
         if not coords: return
         
+        # --- LOGIKA ZA MAPIRANJE (Global -> Local) ---
+        def to_local(gx, gy):
+            # Oduzimamo poziciju sloja i delimo sa skalom sloja
+            lx = (gx - layer.x) / layer.scale
+            ly = (gy - layer.y) / layer.scale
+            return (lx, ly)
+        # ---------------------------------------------
+
         if self.current_tool == "text":
-            cx, cy = coords[0], coords[1]; p = self.map_coords(cx, cy)
-            if p:
-                text = self.properties.entry_text.get(); font_n = self.properties.combo_font.get()
-                try: size = int(self.properties.slider_size.get() / self.zoom_level)
+            cx, cy = coords[0], coords[1]
+            p_global = self.map_coords(cx, cy)
+            if p_global:
+                p_local = to_local(p_global[0], p_global[1]) # Konvertuj u lokalne
+                
+                text = self.properties.entry_text.get()
+                font_n = self.properties.combo_font.get()
+                try: 
+                    # Veličinu fonta takođe prilagođavamo zoom-u i skali sloja
+                    size = int(self.properties.slider_size.get() / self.zoom_level / layer.scale)
                 except: size=20
-                new_img = ImageOpsEngine.add_text(img, p, text, self.tool_color, size, font_n); self.set_active_image(new_img)
+                
+                new_img = ImageOpsEngine.add_text(img, p_local, text, self.tool_color, size, font_n)
+                self.set_active_image(new_img)
+
         elif len(coords) == 4:
-            x1, y1, x2, y2 = coords; p1 = self.map_coords(x1, y1); p2 = self.map_coords(x2, y2)
-            if p1 and p2:
+            x1, y1, x2, y2 = coords
+            p1_global = self.map_coords(x1, y1)
+            p2_global = self.map_coords(x2, y2)
+            
+            if p1_global and p2_global:
+                # Konvertuj obe tačke u lokalni sistem sloja
+                p1 = to_local(p1_global[0], p1_global[1])
+                p2 = to_local(p2_global[0], p2_global[1])
+
                 if self.current_tool == "crop":
-                    new_img = ImageOpsEngine.crop_image(img, (min(p1[0], p2[0]), min(p1[1], p2[1]), max(p1[0], p2[0]), max(p1[1], p2[1]))); self.set_active_image(new_img); self.reset_view()
+                    # Crop je specifičan, on menja dimenzije slike
+                    # Ovde koristimo koordinate unutar slike
+                    box = (min(p1[0], p2[0]), min(p1[1], p2[1]), max(p1[0], p2[0]), max(p1[1], p2[1]))
+                    new_img = ImageOpsEngine.crop_image(img, box)
+                    self.set_active_image(new_img)
+                    # Resetujemo poziciju sloja jer je slika kropovana, ali to je stvar izbora
+                    # self.reset_view() 
                 else:
                     draw = ImageDraw.Draw(img)
-                    try: width = int(self.properties.slider_size.get() / self.zoom_level)
+                    try: 
+                        # Debljina linije mora biti skalirana
+                        width = int(self.properties.slider_size.get() / self.zoom_level / layer.scale)
                     except: width = 5
-                    fill = self.tool_color if (hasattr(self.properties, 'fill_var') and self.properties.fill_var.get()) else None; outline = self.tool_color
-                    if self.current_tool == "line": draw.line([p1, p2], fill=outline, width=width)
+                    
+                    fill = self.tool_color if (hasattr(self.properties, 'fill_var') and self.properties.fill_var.get()) else None
+                    outline = self.tool_color
+                    
+                    if self.current_tool == "line": 
+                        draw.line([p1, p2], fill=outline, width=width)
                     else:
                         rect_coords = [min(p1[0], p2[0]), min(p1[1], p2[1]), max(p1[0], p2[0]), max(p1[1], p2[1])]
-                        if self.current_tool == "rect": draw.rectangle(rect_coords, fill=fill, outline=outline, width=width)
-                        elif self.current_tool == "circle": draw.ellipse(rect_coords, fill=fill, outline=outline, width=width)
+                        if self.current_tool == "rect": 
+                            draw.rectangle(rect_coords, fill=fill, outline=outline, width=width)
+                        elif self.current_tool == "circle": 
+                            draw.ellipse(rect_coords, fill=fill, outline=outline, width=width)
+                    
                     self.set_active_image(img)
-        self.canvas.delete(self.temp_item_id); self.temp_item_id = None; 
+
+        self.canvas.delete(self.temp_item_id)
+        self.temp_item_id = None
         if self.properties: self.properties.hide_apply_btn()
         self._update_canvas()
 
@@ -422,8 +470,8 @@ class CypherLensApp(ctk.CTk):
         elif tool_name == "magic": self.canvas.config(cursor="spider")
         elif tool_name == "text": self.canvas.config(cursor="xterm")
         elif tool_name == "ruler": self.canvas.config(cursor="crosshair")
-        elif tool_name == "brush": self.canvas.config(cursor="dot")      # Dot for brush
-        elif tool_name == "eraser": self.canvas.config(cursor="circle")  # Circle for eraser
+        elif tool_name == "eraser": self.canvas.config(cursor="dot")  # "dot" je precizan, ili stavi "crosshair"
+        elif tool_name == "brush": self.canvas.config(cursor="dot")   # I za četkicu je bolje da bude precizna
         elif tool_name == "eyedropper": self.canvas.config(cursor="crosshair")
         elif tool_name in ["rect", "circle", "line", "crop", "select", "pencil"]: self.canvas.config(cursor="crosshair")
         else: self.canvas.config(cursor="arrow")
